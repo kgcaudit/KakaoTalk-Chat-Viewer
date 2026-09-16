@@ -4,7 +4,7 @@
 // operationally: nothing a user imports reaches the server, and a large conversation
 // stays responsive.
 import { chromium } from 'playwright';
-import { deflateRawSync, crc32 } from 'node:zlib';
+import { deflateRawSync, deflateSync, crc32 } from 'node:zlib';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -23,7 +23,10 @@ const check = (name, ok, detail = '') => {
 function zip(entries) {
   const locals = [], central = [];
   let offset = 0;
-  for (const [name, body] of entries) {
+  for (const [name, content] of entries) {
+    // Declared sizes are in BYTES; a Korean string's length is characters, and the
+    // reader rejects an entry that decompresses past the size the archive claims.
+    const body = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
     const nameBytes = Buffer.from(name, 'utf8');
     const packed = deflateRawSync(body);
     const head = Buffer.alloc(30);
@@ -50,6 +53,28 @@ function zip(entries) {
   end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
   end.writeUInt32LE(dirBytes.length, 12); end.writeUInt32LE(offset, 16);
   return Buffer.concat([Buffer.concat(locals), dirBytes, end]);
+}
+
+// A solid PNG of any shape, so the layout checks can see a real aspect ratio.
+// Width and height only ever reach the browser through the file itself, never CSS.
+function solidPng(width, height) {
+  const chunk = (type, body) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(body.length, 0);
+    head.write(type, 4, 'ascii');
+    const tail = Buffer.alloc(4);
+    tail.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, 'ascii'), body])) >>> 0, 0);
+    return Buffer.concat([head, body, tail]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 2;   // 8 bits per sample, truecolour
+  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(width * 3, 0x80)]);
+  const raw = Buffer.concat(Array.from({ length: height }, () => row));
+  return Buffer.concat([
+    Buffer.from('89504e470d0a1a0a', 'hex'),
+    chunk('IHDR', header), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0)),
+  ]);
 }
 
 const PNG = Buffer.from(
@@ -235,7 +260,7 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
   check('the open room links only its own attachments',
     (await many.textContent('#attachmentCount')).includes('연결됨 3'), await many.textContent('#attachmentCount'));
 
-  await many.click('#rooms .room:nth-child(2)');
+  await many.click('#rooms .room-row:nth-child(2) .room');
   await many.waitForTimeout(500);
   check('switching rooms shows the other conversation',
     (await many.textContent('#count')).includes('전체 90개 메시지'), await many.textContent('#count'));
@@ -292,7 +317,7 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
   check('an exported copy keeps both rooms',
     await reopened.evaluate(() => document.querySelectorAll('#rooms .room').length) === 2);
   check('an exported copy still switches rooms', await (async () => {
-    await reopened.click('#rooms .room:nth-child(2)');
+    await reopened.click('#rooms .room-row:nth-child(2) .room');
     await reopened.waitForTimeout(400);
     return (await reopened.textContent('#count')).includes('전체 90개 메시지');
   })(), await reopened.textContent('#count'));
@@ -330,7 +355,7 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
   check('tapping the picker reveals both rooms',
     await small.evaluate(() => [...document.querySelectorAll('#rooms .room')].filter(b => b.offsetParent !== null).length) === 2);
 
-  await small.click('#rooms .room:nth-child(2)');
+  await small.click('#rooms .room-row:nth-child(2) .room');
   await small.waitForTimeout(500);
   check('choosing a room on a phone switches and closes the list',
     (await small.textContent('#count')).includes('전체 90개 메시지') &&
@@ -485,7 +510,7 @@ check('download filenames stay safe', await app.evaluate(() =>
   await keeper.click('#save');
   await keeper.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
 
-  await keeper.click('#rooms .room:nth-child(2)');
+  await keeper.click('#rooms .room-row:nth-child(2) .room');
   await keeper.waitForTimeout(400);
   await keeper.evaluate(() => { $('messages').scrollTop = 300; $('messages').dispatchEvent(new Event('scroll')); });
   await keeper.waitForTimeout(800);
@@ -516,6 +541,102 @@ check('download filenames stay safe', await app.evaluate(() =>
     await offline.evaluate(() => document.querySelectorAll('#rooms .room').length).catch(() => 0) === 2);
   online = true;
   await kept.close();
+}
+
+// --- removing one conversation leaves the others alone ---
+{
+  const { context: trimming, page: trim } = await freshPage();
+  trim.on('dialog', d => d.accept());
+  await trim.setInputFiles('#txt', { name: 'pair.zip', mimeType: 'application/zip', buffer: pairZip });
+  await trim.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await trim.click('#save');
+  await trim.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+
+  check('the picker stays out of the way on a wide screen',
+    await trim.evaluate(() => getComputedStyle($('roomPicker')).display) === 'none');
+  check('every room offers a remove',
+    await trim.evaluate(() => document.querySelectorAll('#rooms .room-row .room-remove').length) === 2);
+
+  // Open the second room, then remove the first: the open one must stay open.
+  await trim.click('#rooms .room-row:nth-child(2) .room');
+  await trim.waitForTimeout(400);
+  const reading = await trim.textContent('#title');
+  await trim.click('#rooms .room-row:nth-child(1) .room-remove');
+  await trim.waitForTimeout(700);
+  check('removing another room keeps the one you are reading open',
+    (await trim.textContent('#title')) === reading, `${reading} -> ${await trim.textContent('#title')}`);
+  check('only the removed room is gone',
+    await trim.evaluate(() => library.rooms.map(r => r.title).join(',')) === '나군',
+    await trim.evaluate(() => library.rooms.map(r => r.title).join(',')));
+  check('the room counter follows', (await trim.textContent('#roomCount')) === '1');
+
+  await trim.reload();
+  await trim.waitForTimeout(1200);
+  check('the removal survives a reload',
+    await trim.evaluate(() => library.rooms.length) === 1);
+
+  // Removing the last one returns the empty state, not a broken view.
+  await trim.click('#rooms .room-row:nth-child(1) .room-remove');
+  await trim.waitForTimeout(700);
+  check('removing the last room empties the drawer',
+    await trim.evaluate(() => library.rooms.length === 0 && $('count').textContent === '0개 메시지' && $('roomPicker').hidden) === true);
+  await trim.reload();
+  await trim.waitForTimeout(1200);
+  check('the empty drawer stays empty after a reload',
+    await trim.evaluate(() => library.rooms.length) === 0);
+  await trimming.close();
+}
+
+// --- a photo sits in a bubble that fits it, whichever way round it is ---
+// A landscape photo used to land in a bubble sized from max-height x aspect ratio while
+// the photo itself drew at the width cap, leaving a wide empty margin down both sides.
+{
+  const { context: shaped, page: shot } = await freshPage();
+  // Bigger than both caps in every direction, or the caps never come into play and the
+  // regression this guards against cannot show itself.
+  const shapes = [['portrait.png', solidPng(600, 800)], ['landscape.png', solidPng(800, 450)],
+                  ['wide.png', solidPng(1500, 500)]];
+  const lines = ['사진방 카카오톡 대화', '저장한 날짜 : 2024-01-05 10:00:00', '',
+    '--------------- 2024년 1월 1일 월요일 ---------------',
+    ...shapes.map(([name], i) => `[홍길동] [오전 10:0${i + 1}] ${name}`), ''].join('\n');
+  await shot.setInputFiles('#txt', { name: 'shapes.zip', mimeType: 'application/zip',
+    buffer: zip([['사진방/KakaoTalkChats.txt', lines], ...shapes.map(([n, b]) => [`사진방/${n}`, b])]) });
+  await shot.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await shot.click('#save');
+  await shot.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+  await shot.waitForTimeout(600);
+
+  const framed = () => shot.evaluate(() => [...document.querySelectorAll('#messages .bubble')]
+    .map(bubble => {
+      const img = bubble.querySelector('img');
+      if (!img || !img.naturalWidth) return null;
+      const outer = bubble.getBoundingClientRect(), inner = img.getBoundingClientRect();
+      return { name: img.alt,
+        side: Math.round(inner.left - outer.left), other: Math.round(outer.right - inner.right),
+        above: Math.round(inner.top - outer.top), below: Math.round(outer.bottom - inner.bottom),
+        width: Math.round(inner.width), height: Math.round(inner.height) };
+    }).filter(Boolean));
+
+  const wide = await framed();
+  check('every shape of photo is drawn', wide.length === 3, wide.map(f => f.name).join(','));
+  check('a photo bubble hugs the photo on every side',
+    wide.every(f => f.side === f.other && Math.abs(f.side - f.above) <= 6),
+    wide.map(f => `${f.name} ${f.width}x${f.height} L${f.side} R${f.other} T${f.above}`).join(' | '));
+  check('a photo wider than tall is capped by width, not shrunk further',
+    wide.filter(f => f.name !== 'portrait.png').every(f => f.width === 220)
+      && wide.find(f => f.name === 'portrait.png').height === 240,
+    wide.map(f => `${f.name} ${f.width}x${f.height}`).join(', '));
+
+  // A narrow bubble must shrink the photo rather than push it out of the bubble.
+  await shot.setViewportSize({ width: 300, height: 740 });
+  await shot.waitForTimeout(400);
+  const narrow = await framed();
+  check('a photo never overflows a narrow bubble',
+    narrow.every(f => f.side >= 0 && f.other >= 0 && f.side === f.other),
+    narrow.map(f => `${f.name} ${f.width}x${f.height} L${f.side} R${f.other}`).join(' | '));
+  check('nothing scrolls sideways on a narrow screen',
+    await shot.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth) === true);
+  await shaped.close();
 }
 
 check('no page or console errors anywhere', errors.length === 0, errors.join(' | '));
