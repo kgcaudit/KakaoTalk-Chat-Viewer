@@ -56,9 +56,9 @@ const PNG = Buffer.from(
   '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a4944415478' +
   '9c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082', 'hex');
 
-function chatText(count, { attachEvery = 0 } = {}) {
+function chatText(count, { attachEvery = 0, title = '홍길동' } = {}) {
   const people = ['홍길동', '김철수', '이영희', '박민수'];
-  const lines = ['홍길동 님과 카카오톡 대화', '저장한 날짜 : 2024-01-05 10:00:00', ''];
+  const lines = [`${title} 카카오톡 대화`, '저장한 날짜 : 2024-01-05 10:00:00', ''];
   const HOSTILE = '</script><img src=x onerror="window.__pwned=1">';
   const BARE_PLACEHOLDER = '사진';   // what KakaoTalk writes for a photo, and what a person may simply type
   const attachments = [];
@@ -84,12 +84,19 @@ const small = chatText(400, { attachEvery: 50 });
 const smallZip = zip([['c/KakaoTalkChats.txt', small.text], ...small.attachments.map(n => [`c/${n}`, PNG])]);
 // A second, differently sized conversation, so a cross-write between the app and an
 // exported file is actually visible rather than masked by identical content.
-const other = chatText(250);
+const other = chatText(250, { title: '다른방' });
 const otherZip = zip([['c/KakaoTalkChats.txt', other.text]]);
 // Two conversation folders in one archive — what KakaoTalk produces when several
 // rooms are exported together.
-const roomA = chatText(120, { attachEvery: 40 });
-const roomB = chatText(90, { attachEvery: 30 });
+const roomA = chatText(120, { attachEvery: 40, title: '가군' });
+const roomB = chatText(90, { attachEvery: 30, title: '나군' });
+// The same conversation exported again later: identical opening, 30 further messages.
+const roomAlonger = chatText(150, { attachEvery: 40, title: '가군' });
+const roomAlongerZip = zip([
+  ['Chats/KakaoTalk_Chats_A_later/KakaoTalkChats.txt', roomAlonger.text],
+  ...roomAlonger.attachments.map(n => [`Chats/KakaoTalk_Chats_A_later/${n}`, PNG]),
+]);
+const soloB = zip([['solo/KakaoTalkChats.txt', roomB.text]]);
 const pairZip = zip([
   ['Chats/KakaoTalk_Chats_A/KakaoTalkChats.txt', roomA.text],
   ...roomA.attachments.map(n => [`Chats/KakaoTalk_Chats_A/${n}`, PNG]),
@@ -122,6 +129,18 @@ ctx.on('page', p => {
   // blob: and data: never leave the browser; anything else would be an upload path.
   p.on('request', r => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:')) offSite.push(u); });
 });
+
+// Imports stack onto what is already stored, so each scenario gets its own profile.
+async function freshPage(options = {}) {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 850 }, ...options });
+  const created = await context.newPage();
+  created.on('pageerror', e => errors.push(`${created.url()}: ${e.message}`));
+  created.on('console', m => { if (m.type() === 'error' && !expectedRefusal(m.text())) errors.push(`${created.url()}: ${m.text()}`); });
+  created.on('request', r => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:')) offSite.push(u); });
+  await created.goto(origin);
+  await created.waitForTimeout(300);
+  return { context, page: created };
+}
 
 const app = await ctx.newPage();
 await app.goto(origin);
@@ -188,9 +207,7 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
 
 // --- an archive holding two conversations opens as two rooms ---
 {
-  const many = await ctx.newPage();
-  await many.goto(origin);
-  await many.waitForTimeout(300);
+  const { context: manyContext, page: many } = await freshPage({ acceptDownloads: true });
   await many.setInputFiles('#txt', { name: 'pair.zip', mimeType: 'application/zip', buffer: pairZip });
   await many.waitForFunction(() => $('review').open, null, { timeout: 60000 });
   check('an archive with two conversations is accepted',
@@ -226,7 +243,38 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
     many.click('#portableActions button'),
   ]);
   pairExport = fs.readFileSync(await pairDownload.path());
-  await many.close();
+
+  // A later export of the same conversation adds only what is genuinely new.
+  await many.setInputFiles('#txt', { name: 'a-later.zip', mimeType: 'application/zip', buffer: roomAlongerZip });
+  await many.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  check('a later export of the same conversation reports only the new messages',
+    (await many.textContent('#sample')).includes('30개 추가'), (await many.textContent('#sample')).split('\n')[0]);
+  await many.click('#save');
+  await many.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+  await many.waitForTimeout(300);
+  check('the conversation grew instead of being replaced',
+    await many.evaluate(() => library.rooms.map(r => `${r.title}:${r.messages.length}`).join(',')) === '가군:150,나군:90',
+    await many.evaluate(() => library.rooms.map(r => `${r.title}:${r.messages.length}`).join(',')));
+  check('merged messages keep contiguous ids',
+    await many.evaluate(() => library.rooms.every(r => r.messages.every((m, i) => m.id === i))));
+
+  // Bringing the very same archive back in changes nothing.
+  await many.setInputFiles('#txt', { name: 'a-again.zip', mimeType: 'application/zip', buffer: roomAlongerZip });
+  await many.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  check('re-importing the same export offers nothing to add',
+    await many.evaluate(() => $('save').disabled) === true, await many.textContent('#warnings'));
+  await many.click('#cancel');
+  await many.waitForTimeout(200);
+
+  // A separate archive for a room already held stacks on rather than wiping the rest.
+  await many.setInputFiles('#txt', { name: 'solo-b.zip', mimeType: 'application/zip', buffer: soloB });
+  await many.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await many.click('#cancel');
+  await many.waitForTimeout(200);
+  check('a separate archive leaves the other rooms in place',
+    await many.evaluate(() => library.rooms.length) === 2);
+
+  await manyContext.close();
 
   const reopened = await ctx.newPage();
   await reopened.route('**/pair-export', r => r.fulfill({ contentType: 'text/html; charset=utf-8', body: pairExport }));
@@ -244,21 +292,19 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
 
 // On a phone the sidebar collapses to a bar, so rooms are reached through a picker.
 {
-  const phone = await browser.newContext({ viewport: { width: 414, height: 840 }, isMobile: true, hasTouch: true });
-  const small = await phone.newPage();
-  small.on('pageerror', e => errors.push(`phone: ${e.message}`));
-  small.on('console', m => { if (m.type() === 'error' && !expectedRefusal(m.text())) errors.push(`phone: ${m.text()}`); });
-  await small.goto(origin);
-  await small.waitForTimeout(300);
+  const phoneView = { viewport: { width: 414, height: 840 }, isMobile: true, hasTouch: true };
 
   // One conversation needs no picker, so the bar stays exactly as it was.
-  await small.setInputFiles('#txt', { name: 'chat.zip', mimeType: 'application/zip', buffer: smallZip });
-  await small.waitForFunction(() => $('review').open, null, { timeout: 60000 });
-  await small.click('#save');
-  await small.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+  const lone = await freshPage(phoneView);
+  await lone.page.setInputFiles('#txt', { name: 'chat.zip', mimeType: 'application/zip', buffer: smallZip });
+  await lone.page.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await lone.page.click('#save');
+  await lone.page.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
   check('a single conversation shows no picker on a phone',
-    await small.evaluate(() => $('roomPicker').hidden) === true);
+    await lone.page.evaluate(() => $('roomPicker').hidden) === true);
+  await lone.context.close();
 
+  const { context: phone, page: small } = await freshPage(phoneView);
   await small.setInputFiles('#txt', { name: 'pair.zip', mimeType: 'application/zip', buffer: pairZip });
   await small.waitForFunction(() => $('review').open, null, { timeout: 60000 });
   await small.click('#save');
@@ -329,7 +375,7 @@ const [download] = await Promise.all([
 exported = fs.readFileSync(await download.path());
 check('export produces a standalone file', exported.length > page.length);
 
-// Replace the app's conversation, so it differs from the file just exported.
+// Bring in a second conversation, so what the app holds differs from the file just exported.
 await app.setInputFiles('#txt', { name: 'other.zip', mimeType: 'application/zip', buffer: otherZip });
 await app.waitForFunction(() => $('review').open, null, { timeout: 60000 });
 await app.click('#save');
@@ -347,11 +393,12 @@ const saved = await app.evaluate(() => new Promise(res => {
   req.onerror = () => res(null);
   req.onsuccess = () => {
     const get = req.result.transaction('data', 'readonly').objectStore('data').get('chat');
-    get.onsuccess = () => res(get.result?.rooms?.[0]?.messages.length ?? null);
+    get.onsuccess = () => res((get.result?.rooms ?? []).map(r => `${r.title}:${r.messages.length}`).join(','));
     get.onerror = () => res(null);
   };
 }));
-check('app keeps its conversation in IndexedDB', saved === 250, `${saved} messages`);
+check('importing stacks conversations rather than replacing them',
+  saved === '홍길동:400,다른방:250', String(saved));
 
 // A fresh profile shows what an exported file leaves behind on its own.
 const clean = await browser.newContext({ viewport: { width: 1280, height: 850 } });
