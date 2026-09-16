@@ -1,0 +1,21 @@
+chat.example.com {
+	root * /srv/kakaotalk-chat-viewer
+	encode gzip
+	file_server
+
+	# The page's own <meta> CSP keeps chat data in the browser; these cover what it cannot.
+	header {
+		Content-Security-Policy "frame-ancestors 'none'"
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		Cache-Control "no-cache"
+	}
+
+	# Read-only host: no request may carry a chat file to the server.
+	@writes not method GET HEAD
+	respond @writes 405
+}

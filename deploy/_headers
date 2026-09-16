@@ -1,0 +1,12 @@
+# Netlify / Cloudflare Pages header rules.
+# The page's own <meta> CSP already blocks every outbound request (connect-src 'none'),
+# which is what keeps uploaded chat data inside the browser. These headers add the
+# protections a <meta> tag cannot express — frame-ancestors above all.
+/*
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Resource-Policy: same-origin
