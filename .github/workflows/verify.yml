@@ -1,0 +1,65 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push supersedes an in-flight run on the same branch.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The browser build is tied to the Playwright version, which package.json
+      # pins exactly, so the cache key can be that version alone.
+      - name: Read the pinned Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Chromium build
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      - name: Install Chromium
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      # A cached browser still needs its system libraries on a fresh runner.
+      - name: Install Chromium system libraries
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # Fails with the command to run if an inline script changed without
+      # regenerating the hashes, before anything slower gets a chance to.
+      - name: Check the CSP hashes are current
+        run: node tools/csp-hashes.mjs --check
+
+      - name: Validate the markup
+        run: npm run lint:html
+
+      # Imports a ZIP, exports it, reopens it, and asserts that nothing left
+      # the origin and that 50,000 messages still render in under two seconds.
+      - name: Run the browser checks
+        run: node tests/verify.mjs
