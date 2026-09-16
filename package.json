@@ -4,7 +4,8 @@
   "type": "module",
   "description": "대화서랍 — 브라우저 안에서만 동작하는 카카오톡 대화 뷰어",
   "scripts": {
-    "test": "node tests/verify.mjs",
+    "test": "node tools/csp-hashes.mjs --check && node tests/verify.mjs",
+    "csp": "node tools/csp-hashes.mjs",
     "serve": "npx --yes http-server . -p 8080 -c-1"
   },
   "devDependencies": {

@@ -60,6 +60,7 @@ function chatText(count, { attachEvery = 0 } = {}) {
   const people = ['홍길동', '김철수', '이영희', '박민수'];
   const lines = ['홍길동 님과 카카오톡 대화', '저장한 날짜 : 2024-01-05 10:00:00', ''];
   const HOSTILE = '</script><img src=x onerror="window.__pwned=1">';
+  const BARE_PLACEHOLDER = '사진';   // what KakaoTalk writes for a photo, and what a person may simply type
   const attachments = [];
   for (let i = 0; i < count; i++) {
     if (i % 200 === 0) lines.push(`--------------- 2024년 ${1 + (i / 6000 | 0)}월 ${1 + (i / 200 | 0) % 28}일 월요일 ---------------`);
@@ -70,6 +71,8 @@ function chatText(count, { attachEvery = 0 } = {}) {
       lines.push(`[${who}] [${clock}] ${name}`);
     } else if (i === 7) {
       lines.push(`[${who}] [${clock}] ${HOSTILE}`);
+    } else if (i === 11) {
+      lines.push(`[${who}] [${clock}] ${BARE_PLACEHOLDER}`);
     } else {
       lines.push(`[${who}] [${clock}] 메시지 본문 ${i} 입니다.`);
     }
@@ -99,9 +102,12 @@ const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1280, height: 850 }, acceptDownloads: true });
 const errors = [];
 const offSite = [];
+// The CSP probes below deliberately trip the policy; every other refusal is a real fault.
+let probing = false;
+const expectedRefusal = text => probing && /Refused to|Content Security Policy/i.test(text);
 ctx.on('page', p => {
   p.on('pageerror', e => errors.push(`${p.url()}: ${e.message}`));
-  p.on('console', m => { if (m.type() === 'error') errors.push(`${p.url()}: ${m.text()}`); });
+  p.on('console', m => { if (m.type() === 'error' && !expectedRefusal(m.text())) errors.push(`${p.url()}: ${m.text()}`); });
   // blob: and data: never leave the browser; anything else would be an upload path.
   p.on('request', r => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:')) offSite.push(u); });
 });
@@ -109,6 +115,29 @@ ctx.on('page', p => {
 const app = await ctx.newPage();
 await app.goto(origin);
 await app.waitForTimeout(400);
+
+// The policy pins every inline script by hash; 'unsafe-inline' would defeat it.
+const csp = page.toString('utf8').match(/<meta http-equiv="Content-Security-Policy" content="([^"]*)"/)[1];
+check('script-src carries no unsafe-inline', !/script-src[^;]*'unsafe-inline'/.test(csp));
+check('script-src pins hashes', (csp.match(/sha256-/g) || []).length >= 10, `${(csp.match(/sha256-/g) || []).length} hashes`);
+
+probing = true;
+check('the page refuses an injected inline script and style', await app.evaluate(async () => {
+  const s = document.createElement('script'); s.textContent = 'window.__injected=1'; document.head.append(s);
+  const t = document.createElement('style'); t.textContent = 'body{display:none}'; document.head.append(t);
+  await new Promise(r => setTimeout(r, 150));
+  const blocked = window.__injected === undefined && getComputedStyle(document.body).display !== 'none';
+  s.remove(); t.remove();
+  // the app writes element.style directly, which style-src-attr must still allow
+  const probe = document.createElement('div'); probe.style.color = 'rgb(1, 2, 3)';
+  return blocked && probe.style.color === 'rgb(1, 2, 3)';
+}) === true);
+
+check('the page cannot reach any other origin', await app.evaluate(async () => {
+  try { await fetch('https://example.com'); return false; } catch { return true; }
+}) === true);
+await app.waitForTimeout(150);
+probing = false;
 
 check('no duplicate element ids', (await app.evaluate(() => {
   const seen = new Map();
@@ -125,6 +154,13 @@ await app.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
 check('ZIP import parses every message', (await app.textContent('#count')).includes('전체 400개 메시지'), await app.textContent('#count'));
 check('import links its attachments', (await app.textContent('#attachmentCount')).includes('연결됨 8'), await app.textContent('#attachmentCount'));
 check('import sends nothing off-origin', offSite.length === requestsBefore, offSite.slice(requestsBefore).join(', '));
+
+// '사진' on its own may be KakaoTalk's photo placeholder or a real message. Keep both.
+check('a bare 사진 message keeps its text and still offers the picker', await app.evaluate(() => {
+  const bubble = [...document.querySelectorAll('.message .bubble')]
+    .find(b => b.firstChild?.nodeType === Node.TEXT_NODE && b.firstChild.textContent === '사진');
+  return !!bubble && !!bubble.querySelector('.missing-attachment button');
+}) === true);
 
 check('enlarged image survives a re-render', await app.evaluate(async () => {
   const button = document.querySelector('#messages .image-attachment');

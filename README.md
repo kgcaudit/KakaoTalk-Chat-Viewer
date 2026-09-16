@@ -4,10 +4,23 @@
 `index.html` 하나가 전부이며, 빌드 과정이 없습니다.
 
 ```
-index.html          뷰어 본체 (이 파일만 배포하면 됩니다)
-deploy/             정적 호스팅용 보안 헤더 설정 (nginx · Caddy · Netlify/Cloudflare Pages)
-tests/verify.mjs    배포 전 검증 스위트
+index.html            뷰어 본체 (이 파일만 배포하면 됩니다)
+deploy/               정적 호스팅용 보안 헤더 설정 (nginx · Caddy · Netlify/Cloudflare Pages)
+tools/csp-hashes.mjs  인라인 스크립트·스타일의 CSP 해시 생성기
+tests/verify.mjs      배포 전 검증 스위트
 ```
+
+## 인라인 스크립트를 수정했다면
+
+CSP가 인라인 스크립트를 **해시로 고정**하고 있습니다. `index.html`의 `<script>`나 `<style>`을
+한 글자라도 고치면 반드시 해시를 다시 만드세요.
+
+```sh
+npm run csp     # <meta> CSP를 현재 내용에 맞게 갱신
+```
+
+잊어도 조용히 깨지지는 않습니다. `npm test`가 브라우저를 띄우기 전에 해시를 먼저 검사하고,
+어긋나면 실행할 명령을 알려주며 멈춥니다.
 
 ## 배포
 
@@ -31,11 +44,16 @@ npm test
 **1. 브라우저가 차단합니다.** `index.html`의 `<meta>` CSP가 모든 바깥 통신을 막습니다.
 
 ```
-default-src 'none'; connect-src 'none'; form-action 'none'; base-uri 'none'
+default-src 'none'; script-src 'sha256-…'; style-src-elem 'sha256-…';
+connect-src 'none'; form-action 'none'; base-uri 'none'
 ```
 
 `connect-src 'none'`은 `fetch`·`XMLHttpRequest`·`sendBeacon`·WebSocket을 전부 거부하고,
 `form-action 'none'`은 폼 전송을, `base-uri 'none'`은 기준 URL 탈취를 막습니다.
+`script-src`에 `'unsafe-inline'`이 없고 실제 스크립트의 SHA-256만 들어 있으므로,
+주입된 인라인 스크립트는 실행되지 않습니다(`style-src-elem`도 같은 방식). 앱이 쓰는
+인라인 style **속성**은 `style-src`로 허용되며, `style-src-elem`을 모르는 브라우저는
+`style-src`로 안전하게 되돌아갑니다.
 파일은 `<input type="file">`과 File API로만 읽으므로 네트워크를 거치지 않습니다.
 ZIP 해제(`DecompressionStream`)와 미리보기(`blob:` URL)도 전부 브라우저 안에서 끝납니다.
 
@@ -62,9 +80,9 @@ ZIP 가져오기에 `DecompressionStream('deflate-raw')`이 필요합니다. 지
 
 ## 알려진 동작
 
-- 본문이 정확히 `사진`, `동영상`, `음성메시지`인 메시지는 첨부물 참조로 간주되어
-  "첨부물 확인 필요" 카드로 표시됩니다. 카카오톡 내보내기 형식이 원본 파일명을 남기지 않기
-  때문이며, 사용자가 실제로 "사진"이라고만 친 메시지도 같이 걸립니다.
+- 본문이 정확히 `사진`, `동영상`, `음성메시지`인 메시지에는 "첨부물 확인 필요" 카드가
+  **본문과 함께** 표시됩니다. 카카오톡 내보내기 형식이 원본 파일명을 남기지 않아 실제 사진인지
+  사용자가 그렇게 친 것인지 구분할 수 없으므로, 본문을 지우지 않고 파일 연결 수단만 덧붙입니다.
 - ZIP은 512MB까지, 항목 10,000개까지 받습니다. 더 큰 기록은 압축을 풀어 나누어 가져와야 합니다.
 - 내보내기는 첨부물을 base64로 인라인하므로 결과 파일이 원본의 약 1.34배가 됩니다
   (base64의 이론상 하한). 첨부물이 수백 MB인 대화는 나누어 내보내세요.
