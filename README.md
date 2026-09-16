@@ -4,8 +4,8 @@
 `index.html` 하나가 전부이며, 빌드 과정이 없습니다.
 
 ```
-index.html            뷰어 본체 (이 파일만 배포하면 됩니다)
-.github/workflows/    CI (푸시·PR마다 아래 검증을 그대로 실행)
+index.html            뷰어 본체 (이 파일만 배포됩니다)
+.github/workflows/    CI + GitHub Pages 배포
 deploy/               정적 호스팅용 보안 헤더 설정 (nginx · Caddy · Netlify/Cloudflare Pages)
 tools/csp-hashes.mjs  인라인 스크립트·스타일의 CSP 해시 생성기
 tests/verify.mjs      배포 전 검증 스위트
@@ -25,7 +25,26 @@ npm run csp     # <meta> CSP를 현재 내용에 맞게 갱신
 
 ## 배포
 
+### GitHub Pages (현재 사용 중)
+
+`main`의 검증이 통과하면 `.github/workflows/verify.yml`의 `deploy` 잡이 자동으로 배포합니다.
+공개되는 파일은 **`index.html` 하나뿐**이며, 테스트·도구·서버 설정은 저장소에만 남습니다.
+
+처음 한 번은 **Settings → Pages → Source** 를 `GitHub Actions`로 지정해야 합니다
+(워크플로가 스스로 켜려 시도하지만, 저장소 권한에 따라 수동 선택이 필요할 수 있습니다).
+
+Pages는 응답 헤더를 설정할 수 없어 `deploy/`의 `frame-ancestors` 등은 적용되지 않습니다.
+**이 페이지에서는 실질적인 차이가 없습니다** — 서버에 세션도 저장 데이터도 없고, 파괴적인
+동작(`저장된 대화 삭제`)은 네이티브 `confirm()`을, 가져오기는 네이티브 파일 선택창을 거치므로
+클릭재킹으로 유도할 수 없습니다. 바깥 통신을 막는 `connect-src 'none'`은 페이지의 `<meta>`
+CSP에 있어 Pages에서도 그대로 작동합니다. 메시지 속 링크는 `rel="noopener noreferrer"`라
+리퍼러도 새지 않습니다.
+
+### 직접 호스팅
+
 `index.html`을 정적 호스팅에 올리고, `deploy/` 아래 설정 중 환경에 맞는 것을 적용하세요.
+Cloudflare Pages·Netlify는 `deploy/_headers`를, nginx·Caddy는 해당 설정 파일을 그대로 씁니다.
+이쪽은 `frame-ancestors`와 GET·HEAD 외 메서드 거부까지 적용됩니다.
 
 ```sh
 # 로컬 확인

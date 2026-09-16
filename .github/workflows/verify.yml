@@ -63,3 +63,40 @@ jobs:
       # the origin and that 50,000 messages still render in under two seconds.
       - name: Run the browser checks
         run: node tests/verify.mjs
+
+  # Publishes to GitHub Pages only after the checks above pass, and only from main.
+  # Requires Settings -> Pages -> Source: "GitHub Actions" (configure-pages tries to
+  # set that itself, but the repository owner may still have to select it once).
+  deploy:
+    needs: verify
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only the viewer is published. Tests, tooling and the server configs stay in
+      # the repository rather than being served to visitors.
+      - name: Assemble the published site
+        run: |
+          mkdir -p site
+          cp index.html site/
+          touch site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
