@@ -242,6 +242,54 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
   await reopened.close();
 }
 
+// On a phone the sidebar collapses to a bar, so rooms are reached through a picker.
+{
+  const phone = await browser.newContext({ viewport: { width: 414, height: 840 }, isMobile: true, hasTouch: true });
+  const small = await phone.newPage();
+  small.on('pageerror', e => errors.push(`phone: ${e.message}`));
+  small.on('console', m => { if (m.type() === 'error' && !expectedRefusal(m.text())) errors.push(`phone: ${m.text()}`); });
+  await small.goto(origin);
+  await small.waitForTimeout(300);
+
+  // One conversation needs no picker, so the bar stays exactly as it was.
+  await small.setInputFiles('#txt', { name: 'chat.zip', mimeType: 'application/zip', buffer: smallZip });
+  await small.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await small.click('#save');
+  await small.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+  check('a single conversation shows no picker on a phone',
+    await small.evaluate(() => $('roomPicker').hidden) === true);
+
+  await small.setInputFiles('#txt', { name: 'pair.zip', mimeType: 'application/zip', buffer: pairZip });
+  await small.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await small.click('#save');
+  await small.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+  await small.waitForTimeout(400);
+
+  check('two conversations put a picker in the bar',
+    await small.evaluate(() => !$('roomPicker').hidden && getComputedStyle($('rooms')).display === 'none'));
+  check('the picker names the open room',
+    (await small.textContent('#roomPicker')).includes(await small.textContent('#title')));
+
+  await small.click('#roomPicker');
+  await small.waitForTimeout(300);
+  check('tapping the picker reveals both rooms',
+    await small.evaluate(() => [...document.querySelectorAll('#rooms .room')].filter(b => b.offsetParent !== null).length) === 2);
+
+  await small.click('#rooms .room:nth-child(2)');
+  await small.waitForTimeout(500);
+  check('choosing a room on a phone switches and closes the list',
+    (await small.textContent('#count')).includes('전체 90개 메시지') &&
+    await small.evaluate(() => !$('rooms').classList.contains('open')), await small.textContent('#count'));
+
+  await small.click('#roomPicker');
+  await small.waitForTimeout(200);
+  await small.click('#messages', { position: { x: 100, y: 300 } });
+  await small.waitForTimeout(200);
+  check('tapping the conversation closes the picker',
+    await small.evaluate(() => !$('rooms').classList.contains('open')));
+  await phone.close();
+}
+
 // A conversation saved by the earlier single-room build must survive the upgrade.
 {
   const upgraded = await ctx.newPage();
