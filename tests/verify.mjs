@@ -86,11 +86,22 @@ const smallZip = zip([['c/KakaoTalkChats.txt', small.text], ...small.attachments
 // exported file is actually visible rather than masked by identical content.
 const other = chatText(250);
 const otherZip = zip([['c/KakaoTalkChats.txt', other.text]]);
+// Two conversation folders in one archive — what KakaoTalk produces when several
+// rooms are exported together.
+const roomA = chatText(120, { attachEvery: 40 });
+const roomB = chatText(90, { attachEvery: 30 });
+const pairZip = zip([
+  ['Chats/KakaoTalk_Chats_A/KakaoTalkChats.txt', roomA.text],
+  ...roomA.attachments.map(n => [`Chats/KakaoTalk_Chats_A/${n}`, PNG]),
+  ['Chats/KakaoTalk_Chats_B/KakaoTalkChats.txt', roomB.text],
+  ...roomB.attachments.map(n => [`Chats/KakaoTalk_Chats_B/${n}`, PNG]),
+]);
 const big = chatText(50000, { attachEvery: 120 });
 const bigZip = zip([['c/KakaoTalkChats.txt', big.text], ...big.attachments.map(n => [`c/${n}`, PNG])]);
 
 // --- host it the way production does ---
 let exported = Buffer.from('');
+let pairExport = Buffer.from('');
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(req.url.startsWith('/exported') ? exported : page);
@@ -175,6 +186,91 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
 }) === true);
 
 
+// --- an archive holding two conversations opens as two rooms ---
+{
+  const many = await ctx.newPage();
+  await many.goto(origin);
+  await many.waitForTimeout(300);
+  await many.setInputFiles('#txt', { name: 'pair.zip', mimeType: 'application/zip', buffer: pairZip });
+  await many.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  check('an archive with two conversations is accepted',
+    (await many.textContent('#summary')).includes('대화방 2개'), await many.textContent('#summary'));
+  await many.click('#save');
+  await many.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+
+  check('both conversations appear in the sidebar',
+    await many.evaluate(() => document.querySelectorAll('#rooms .room').length) === 2);
+  check('the room counter shows both', (await many.textContent('#roomCount')) === '2');
+  check('the first room opens', (await many.textContent('#count')).includes('전체 120개 메시지'),
+    await many.textContent('#count'));
+
+  await many.click('#infoToggle');
+  await many.waitForTimeout(300);
+  check('the open room links only its own attachments',
+    (await many.textContent('#attachmentCount')).includes('연결됨 3'), await many.textContent('#attachmentCount'));
+
+  await many.click('#rooms .room:nth-child(2)');
+  await many.waitForTimeout(500);
+  check('switching rooms shows the other conversation',
+    (await many.textContent('#count')).includes('전체 90개 메시지'), await many.textContent('#count'));
+  await many.click('#infoToggle');
+  await many.waitForTimeout(300);
+  check('the second room links its own attachments',
+    (await many.textContent('#attachmentCount')).includes('연결됨 3'), await many.textContent('#attachmentCount'));
+
+  // Exporting carries every room, and the copy reopens with all of them.
+  await many.evaluate(() => setConversationTools(true));
+  await many.waitForTimeout(300);
+  const [pairDownload] = await Promise.all([
+    many.waitForEvent('download', { timeout: 60000 }),
+    many.click('#portableActions button'),
+  ]);
+  pairExport = fs.readFileSync(await pairDownload.path());
+  await many.close();
+
+  const reopened = await ctx.newPage();
+  await reopened.route('**/pair-export', r => r.fulfill({ contentType: 'text/html; charset=utf-8', body: pairExport }));
+  await reopened.goto(`${origin}/pair-export`);
+  await reopened.waitForTimeout(1500);
+  check('an exported copy keeps both rooms',
+    await reopened.evaluate(() => document.querySelectorAll('#rooms .room').length) === 2);
+  check('an exported copy still switches rooms', await (async () => {
+    await reopened.click('#rooms .room:nth-child(2)');
+    await reopened.waitForTimeout(400);
+    return (await reopened.textContent('#count')).includes('전체 90개 메시지');
+  })(), await reopened.textContent('#count'));
+  await reopened.close();
+}
+
+// A conversation saved by the earlier single-room build must survive the upgrade.
+{
+  const upgraded = await ctx.newPage();
+  await upgraded.goto(origin);
+  await upgraded.waitForTimeout(300);
+  await upgraded.evaluate(() => new Promise(res => {
+    const req = indexedDB.open('conversation-drawer-empty-viewer', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('data');
+    req.onsuccess = () => {
+      const legacy = { title: '예전 대화', me: '홍길동', demo: false, files: [], unparsed: [],
+        participants: ['홍길동', '김철수'],
+        messages: [{ id: 0, date: '2024-01-01', sender: '홍길동', time: '오전 10:01', text: '이전 버전이 저장한 대화' }] };
+      const tx = req.result.transaction('data', 'readwrite');
+      tx.objectStore('data').put(legacy, 'chat');
+      tx.oncomplete = () => res();
+      tx.onerror = () => res();
+    };
+    req.onerror = () => res();
+  }));
+  await upgraded.reload();
+  await upgraded.waitForTimeout(1200);
+  check('a conversation saved by the earlier build still opens',
+    (await upgraded.textContent('#title')) === '예전 대화' &&
+    (await upgraded.textContent('#count')).includes('전체 1개 메시지'), await upgraded.textContent('#count'));
+  check('the upgraded conversation shows as one room',
+    await upgraded.evaluate(() => document.querySelectorAll('#rooms .room').length) === 1);
+  await upgraded.close();
+}
+
 // --- export, then reopen the exported file from the same origin ---
 await app.click('#infoToggle');
 await app.waitForTimeout(300);
@@ -203,7 +299,7 @@ const saved = await app.evaluate(() => new Promise(res => {
   req.onerror = () => res(null);
   req.onsuccess = () => {
     const get = req.result.transaction('data', 'readonly').objectStore('data').get('chat');
-    get.onsuccess = () => res(get.result ? get.result.messages.length : null);
+    get.onsuccess = () => res(get.result?.rooms?.[0]?.messages.length ?? null);
     get.onerror = () => res(null);
   };
 }));
@@ -231,9 +327,12 @@ await clean.close();
 // Files exported by the earlier build carried the whole payload as one base64 blob.
 const payloadOf = html => html.toString('utf8').match(/<script id="embedded-chat" type="application\/octet-stream">([^<]*)<\/script>/)[1];
 check('the new export embeds plain JSON', payloadOf(exported).startsWith('{'));
+check('the new export embeds a room list', JSON.parse(payloadOf(exported)).rooms?.length === 1);
+// The earlier build embedded ONE conversation, base64-wrapped, with no room list.
+const legacyPayload = Buffer.from(JSON.stringify(JSON.parse(payloadOf(exported)).rooms[0]), 'utf8').toString('base64');
 const legacyShell = Buffer.from(page.toString('utf8').replace(
   '<script id="embedded-chat" type="application/octet-stream"></script>',
-  `<script id="embedded-chat" type="application/octet-stream">${Buffer.from(payloadOf(exported), 'utf8').toString('base64')}</script>`), 'utf8');
+  `<script id="embedded-chat" type="application/octet-stream">${legacyPayload}</script>`), 'utf8');
 const legacyCtx = await browser.newContext({ viewport: { width: 1280, height: 850 } });
 const legacyPage = await legacyCtx.newPage();
 await legacyPage.route('**/legacy', r => r.fulfill({ contentType: 'text/html; charset=utf-8', body: legacyShell }));
