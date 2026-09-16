@@ -19,6 +19,7 @@
   더할 게 없으면 `대화 열기`가 비활성화됩니다.
 
 ```
+CLAUDE.md             이 저장소의 작업 절차 (검증 → PR → 머지 → 배포)
 index.html            뷰어 본체
 sw.js                 오프라인 실행용 서비스 워커 (앱 문서만 캐시)
 .github/workflows/    CI + GitHub Pages 배포
@@ -44,6 +45,8 @@ npm run csp     # <meta> CSP를 현재 내용에 맞게 갱신
 ### GitHub Pages (현재 사용 중)
 
 `main`의 검증이 통과하면 `.github/workflows/verify.yml`의 `deploy` 잡이 자동으로 배포합니다.
+PR은 `verify`가 초록이 되는 대로 머지하고 배포까지 확인하는 것이 이 저장소의 기본 절차입니다
+(`CLAUDE.md`). 사람 확인을 받고 싶은 PR은 **초안으로 열거나 `hold` 라벨**을 붙이세요.
 공개되는 파일은 **`index.html` 하나뿐**이며, 테스트·도구·서버 설정은 저장소에만 남습니다.
 
 처음 한 번은 **Settings → Pages → Source** 를 `GitHub Actions`로 지정해야 합니다
