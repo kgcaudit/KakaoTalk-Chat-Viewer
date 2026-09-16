@@ -109,7 +109,16 @@ const bigZip = zip([['c/KakaoTalkChats.txt', big.text], ...big.attachments.map(n
 // --- host it the way production does ---
 let exported = Buffer.from('');
 let pairExport = Buffer.from('');
+const worker = fs.readFileSync(path.join(root, '..', 'sw.js'));
+// Serve the worker the way a real host does; a wrong media type makes registration fail.
+let online = true;
 const server = http.createServer((req, res) => {
+  if (!online) { req.socket.destroy(); return; }
+  if (req.url.startsWith('/sw.js')) {
+    res.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-cache' });
+    res.end(worker);
+    return;
+  }
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(req.url.startsWith('/exported') ? exported : page);
 });
@@ -467,6 +476,47 @@ check('attachment panel rebuilds under 2s', timings.panel < 2000, `${timings.pan
 check('download filenames stay safe', await app.evaluate(() =>
   JSON.stringify(['', '  ..  ', 'CON', 'a/b:c*d?e'].map(downloadName)) ===
   JSON.stringify(['대화기록.html', '대화기록.html', '대화기록.html', 'a_b_c_d_e.html'])));
+
+// --- the device keeps the work: where you were, and the app itself ---
+{
+  const { context: kept, page: keeper } = await freshPage();
+  await keeper.setInputFiles('#txt', { name: 'pair.zip', mimeType: 'application/zip', buffer: pairZip });
+  await keeper.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await keeper.click('#save');
+  await keeper.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+
+  await keeper.click('#rooms .room:nth-child(2)');
+  await keeper.waitForTimeout(400);
+  await keeper.evaluate(() => { $('messages').scrollTop = 300; $('messages').dispatchEvent(new Event('scroll')); });
+  await keeper.waitForTimeout(800);
+
+  const before = await keeper.textContent('#title');
+  await keeper.reload();
+  await keeper.waitForTimeout(1500);
+  check('a reload reopens the room you were reading',
+    (await keeper.textContent('#title')) === before, `${before} -> ${await keeper.textContent('#title')}`);
+  check('a reload restores the scroll position',
+    Math.abs(await keeper.evaluate(() => $('messages').scrollTop) - 300) < 20,
+    String(await keeper.evaluate(() => Math.round($('messages').scrollTop))));
+
+  check('the offline shell is installed',
+    await keeper.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())?.active) === true);
+  check('the sidebar reports what the device holds',
+    (await keeper.textContent('#storageState')).includes('오프라인 준비됨'),
+    await keeper.textContent('#storageState'));
+
+  // With the host unreachable, a brand-new tab must still open the app and the chats.
+  online = false;
+  const offline = await kept.newPage();
+  await offline.goto(origin, { waitUntil: 'load' }).catch(() => {});
+  await offline.waitForTimeout(1500);
+  check('the app opens with the host unreachable',
+    (await offline.title().catch(() => '')).includes('대화서랍'), await offline.title().catch(() => '(no title)'));
+  check('the conversations are there offline',
+    await offline.evaluate(() => document.querySelectorAll('#rooms .room').length).catch(() => 0) === 2);
+  online = true;
+  await kept.close();
+}
 
 check('no page or console errors anywhere', errors.length === 0, errors.join(' | '));
 check('nothing at all left the origin', offSite.length === 0, offSite.join(', '));

@@ -33,6 +33,8 @@ const policy = [
   'img-src data: blob:',
   'media-src data: blob:',
   "connect-src 'none'",
+  // The offline shell worker is same-origin; it is the only worker the page starts.
+  "worker-src 'self'",
   "base-uri 'none'",
   "form-action 'none'",
 ].join('; ');

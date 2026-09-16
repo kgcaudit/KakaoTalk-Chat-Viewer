@@ -87,7 +87,7 @@ jobs:
       - name: Assemble the published site
         run: |
           mkdir -p site
-          cp index.html site/
+          cp index.html sw.js site/
           touch site/.nojekyll
 
       - uses: actions/configure-pages@v5
