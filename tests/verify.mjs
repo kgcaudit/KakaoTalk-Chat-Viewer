@@ -235,7 +235,7 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
   check('the open room links only its own attachments',
     (await many.textContent('#attachmentCount')).includes('연결됨 3'), await many.textContent('#attachmentCount'));
 
-  await many.click('#rooms .room:nth-child(2)');
+  await many.click('#rooms .room-row:nth-child(2) .room');
   await many.waitForTimeout(500);
   check('switching rooms shows the other conversation',
     (await many.textContent('#count')).includes('전체 90개 메시지'), await many.textContent('#count'));
@@ -292,7 +292,7 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
   check('an exported copy keeps both rooms',
     await reopened.evaluate(() => document.querySelectorAll('#rooms .room').length) === 2);
   check('an exported copy still switches rooms', await (async () => {
-    await reopened.click('#rooms .room:nth-child(2)');
+    await reopened.click('#rooms .room-row:nth-child(2) .room');
     await reopened.waitForTimeout(400);
     return (await reopened.textContent('#count')).includes('전체 90개 메시지');
   })(), await reopened.textContent('#count'));
@@ -330,7 +330,7 @@ check('enlarged image survives a re-render', await app.evaluate(async () => {
   check('tapping the picker reveals both rooms',
     await small.evaluate(() => [...document.querySelectorAll('#rooms .room')].filter(b => b.offsetParent !== null).length) === 2);
 
-  await small.click('#rooms .room:nth-child(2)');
+  await small.click('#rooms .room-row:nth-child(2) .room');
   await small.waitForTimeout(500);
   check('choosing a room on a phone switches and closes the list',
     (await small.textContent('#count')).includes('전체 90개 메시지') &&
@@ -485,7 +485,7 @@ check('download filenames stay safe', await app.evaluate(() =>
   await keeper.click('#save');
   await keeper.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
 
-  await keeper.click('#rooms .room:nth-child(2)');
+  await keeper.click('#rooms .room-row:nth-child(2) .room');
   await keeper.waitForTimeout(400);
   await keeper.evaluate(() => { $('messages').scrollTop = 300; $('messages').dispatchEvent(new Event('scroll')); });
   await keeper.waitForTimeout(800);
@@ -516,6 +516,50 @@ check('download filenames stay safe', await app.evaluate(() =>
     await offline.evaluate(() => document.querySelectorAll('#rooms .room').length).catch(() => 0) === 2);
   online = true;
   await kept.close();
+}
+
+// --- removing one conversation leaves the others alone ---
+{
+  const { context: trimming, page: trim } = await freshPage();
+  trim.on('dialog', d => d.accept());
+  await trim.setInputFiles('#txt', { name: 'pair.zip', mimeType: 'application/zip', buffer: pairZip });
+  await trim.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await trim.click('#save');
+  await trim.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+
+  check('the picker stays out of the way on a wide screen',
+    await trim.evaluate(() => getComputedStyle($('roomPicker')).display) === 'none');
+  check('every room offers a remove',
+    await trim.evaluate(() => document.querySelectorAll('#rooms .room-row .room-remove').length) === 2);
+
+  // Open the second room, then remove the first: the open one must stay open.
+  await trim.click('#rooms .room-row:nth-child(2) .room');
+  await trim.waitForTimeout(400);
+  const reading = await trim.textContent('#title');
+  await trim.click('#rooms .room-row:nth-child(1) .room-remove');
+  await trim.waitForTimeout(700);
+  check('removing another room keeps the one you are reading open',
+    (await trim.textContent('#title')) === reading, `${reading} -> ${await trim.textContent('#title')}`);
+  check('only the removed room is gone',
+    await trim.evaluate(() => library.rooms.map(r => r.title).join(',')) === '나군',
+    await trim.evaluate(() => library.rooms.map(r => r.title).join(',')));
+  check('the room counter follows', (await trim.textContent('#roomCount')) === '1');
+
+  await trim.reload();
+  await trim.waitForTimeout(1200);
+  check('the removal survives a reload',
+    await trim.evaluate(() => library.rooms.length) === 1);
+
+  // Removing the last one returns the empty state, not a broken view.
+  await trim.click('#rooms .room-row:nth-child(1) .room-remove');
+  await trim.waitForTimeout(700);
+  check('removing the last room empties the drawer',
+    await trim.evaluate(() => library.rooms.length === 0 && $('count').textContent === '0개 메시지' && $('roomPicker').hidden) === true);
+  await trim.reload();
+  await trim.waitForTimeout(1200);
+  check('the empty drawer stays empty after a reload',
+    await trim.evaluate(() => library.rooms.length) === 0);
+  await trimming.close();
 }
 
 check('no page or console errors anywhere', errors.length === 0, errors.join(' | '));
