@@ -59,6 +59,7 @@ const PNG = Buffer.from(
 function chatText(count, { attachEvery = 0 } = {}) {
   const people = ['홍길동', '김철수', '이영희', '박민수'];
   const lines = ['홍길동 님과 카카오톡 대화', '저장한 날짜 : 2024-01-05 10:00:00', ''];
+  const HOSTILE = '</script><img src=x onerror="window.__pwned=1">';
   const attachments = [];
   for (let i = 0; i < count; i++) {
     if (i % 200 === 0) lines.push(`--------------- 2024년 ${1 + (i / 6000 | 0)}월 ${1 + (i / 200 | 0) % 28}일 월요일 ---------------`);
@@ -67,11 +68,13 @@ function chatText(count, { attachEvery = 0 } = {}) {
       const name = `photo_${String(i).padStart(5, '0')}.jpg`;
       attachments.push(name);
       lines.push(`[${who}] [${clock}] ${name}`);
+    } else if (i === 7) {
+      lines.push(`[${who}] [${clock}] ${HOSTILE}`);
     } else {
       lines.push(`[${who}] [${clock}] 메시지 본문 ${i} 입니다.`);
     }
   }
-  return { text: Buffer.from(lines.join('\n'), 'utf8'), attachments };
+  return { text: Buffer.from(lines.join('\n'), 'utf8'), attachments, hostile: HOSTILE };
 }
 
 const small = chatText(400, { attachEvery: 50 });
@@ -123,6 +126,19 @@ check('ZIP import parses every message', (await app.textContent('#count')).inclu
 check('import links its attachments', (await app.textContent('#attachmentCount')).includes('연결됨 8'), await app.textContent('#attachmentCount'));
 check('import sends nothing off-origin', offSite.length === requestsBefore, offSite.slice(requestsBefore).join(', '));
 
+check('enlarged image survives a re-render', await app.evaluate(async () => {
+  const button = document.querySelector('#messages .image-attachment');
+  if (!button) return 'no image on screen';
+  button.click();
+  renderMessages();                       // revokes every object URL the message list made
+  await new Promise(r => setTimeout(r, 250));
+  const img = $('largeImage');
+  const ok = $('viewer').open && img.complete && img.naturalWidth > 0;
+  $('viewer').close();
+  return ok;
+}) === true);
+
+
 // --- export, then reopen the exported file from the same origin ---
 await app.click('#infoToggle');
 await app.waitForTimeout(300);
@@ -163,6 +179,9 @@ const soloViewer = await clean.newPage();
 await soloViewer.goto(`${origin}/exported`);
 await soloViewer.waitForTimeout(1200);
 check('exported file reopens with its conversation', (await soloViewer.textContent('#count')).includes('전체 400개 메시지'));
+check('a message containing </script> survives the export intact',
+  await soloViewer.evaluate(t => [...document.querySelectorAll('.bubble')].some(b => b.textContent === t), small.hostile));
+check('no markup from message text is executed', await soloViewer.evaluate(() => window.__pwned === undefined));
 check('exported file asks not to be indexed',
   await soloViewer.evaluate(() => document.querySelector('meta[name="robots"]')?.content.includes('noindex') === true));
 await soloViewer.evaluate(() => { $('me').value = '김철수'; $('me').dispatchEvent(new Event('change')); });
@@ -172,6 +191,21 @@ check('exported file creates no database, even after an edit',
 check('exported file stores no conversation in localStorage',
   (await soloViewer.evaluate(() => Object.keys(localStorage))).every(k => k === 'conversation-drawer-sidebar-width'));
 await clean.close();
+
+// Files exported by the earlier build carried the whole payload as one base64 blob.
+const payloadOf = html => html.toString('utf8').match(/<script id="embedded-chat" type="application\/octet-stream">([^<]*)<\/script>/)[1];
+check('the new export embeds plain JSON', payloadOf(exported).startsWith('{'));
+const legacyShell = Buffer.from(page.toString('utf8').replace(
+  '<script id="embedded-chat" type="application/octet-stream"></script>',
+  `<script id="embedded-chat" type="application/octet-stream">${Buffer.from(payloadOf(exported), 'utf8').toString('base64')}</script>`), 'utf8');
+const legacyCtx = await browser.newContext({ viewport: { width: 1280, height: 850 } });
+const legacyPage = await legacyCtx.newPage();
+await legacyPage.route('**/legacy', r => r.fulfill({ contentType: 'text/html; charset=utf-8', body: legacyShell }));
+await legacyPage.goto(`${origin}/legacy`);
+await legacyPage.waitForTimeout(1500);
+check('a file exported by the earlier build still opens',
+  (await legacyPage.textContent('#count')).includes('전체 400개 메시지'), await legacyPage.textContent('#count'));
+await legacyCtx.close();
 
 // Alongside a saved conversation on the same origin, its writes must not reach that store.
 const viewer = await ctx.newPage();
@@ -199,6 +233,10 @@ const timings = await heavy.evaluate(() => {
 check('50,000 messages render under 2s', timings.render < 2000, `${timings.render}ms`);
 check('paging through 50,000 messages stays under 2s', timings.turn < 2000, `${timings.turn}ms`);
 check('attachment panel rebuilds under 2s', timings.panel < 2000, `${timings.panel}ms`);
+
+check('download filenames stay safe', await app.evaluate(() =>
+  JSON.stringify(['', '  ..  ', 'CON', 'a/b:c*d?e'].map(downloadName)) ===
+  JSON.stringify(['대화기록.html', '대화기록.html', '대화기록.html', 'a_b_c_d_e.html'])));
 
 check('no page or console errors anywhere', errors.length === 0, errors.join(' | '));
 check('nothing at all left the origin', offSite.length === 0, offSite.join(', '));
