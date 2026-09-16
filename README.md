@@ -5,6 +5,7 @@
 
 ```
 index.html            뷰어 본체 (이 파일만 배포하면 됩니다)
+.github/workflows/    CI (푸시·PR마다 아래 검증을 그대로 실행)
 deploy/               정적 호스팅용 보안 헤더 설정 (nginx · Caddy · Netlify/Cloudflare Pages)
 tools/csp-hashes.mjs  인라인 스크립트·스타일의 CSP 해시 생성기
 tests/verify.mjs      배포 전 검증 스위트
@@ -30,11 +31,26 @@ npm run csp     # <meta> CSP를 현재 내용에 맞게 갱신
 # 로컬 확인
 npm run serve        # http://localhost:8080
 
-# 배포 전 검증 (Playwright Chromium 필요)
-npm install
+# 배포 전 검증
+npm ci
 npx playwright install chromium
 npm test
 ```
+
+`npm test`는 세 가지를 차례로 돌립니다.
+
+| 단계 | 내용 |
+|---|---|
+| `tools/csp-hashes.mjs --check` | CSP 해시가 현재 인라인 스크립트와 일치하는지 |
+| `npm run lint:html` | `html-validate` 마크업 검사 |
+| `tests/verify.mjs` | 실제 Chromium으로 가져오기·내보내기·성능 28개 항목 |
+
+빠른 두 가지를 먼저 돌리므로, 해시를 잊었거나 마크업이 깨졌으면 브라우저가 뜨기 전에 멈춥니다.
+
+**CI**: `.github/workflows/verify.yml`이 `main` 푸시와 모든 PR에서 같은 순서로 실행합니다.
+브라우저 빌드는 Playwright 버전에 묶여 있으므로 `package.json`이 버전을 **정확히 고정**하고
+(범위 지정 아님), 워크플로는 그 버전을 캐시 키로 씁니다. Playwright를 올릴 때는 버전을
+직접 바꿔 주세요.
 
 ## 업로드 자료는 호스팅에 남지 않습니다
 
