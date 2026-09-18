@@ -7,6 +7,7 @@ import { chromium } from 'playwright';
 import { deflateRawSync, deflateSync, crc32 } from 'node:zlib';
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -160,8 +161,9 @@ const expectedRefusal = text => probing && /Refused to|Content Security Policy/i
 ctx.on('page', p => {
   p.on('pageerror', e => errors.push(`${p.url()}: ${e.message}`));
   p.on('console', m => { if (m.type() === 'error' && !expectedRefusal(m.text())) errors.push(`${p.url()}: ${m.text()}`); });
-  // blob: and data: never leave the browser; anything else would be an upload path.
-  p.on('request', r => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:')) offSite.push(u); });
+  // blob:, data: and file: never leave the browser; anything else would be an upload path.
+  // (file: is the downloaded viewer being opened from disk, below.)
+  p.on('request', r => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:') && !u.startsWith('file:')) offSite.push(u); });
 });
 
 // Imports stack onto what is already stored, so each scenario gets its own profile.
@@ -170,7 +172,7 @@ async function freshPage(options = {}) {
   const created = await context.newPage();
   created.on('pageerror', e => errors.push(`${created.url()}: ${e.message}`));
   created.on('console', m => { if (m.type() === 'error' && !expectedRefusal(m.text())) errors.push(`${created.url()}: ${m.text()}`); });
-  created.on('request', r => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:')) offSite.push(u); });
+  created.on('request', r => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:') && !u.startsWith('file:')) offSite.push(u); });
   await created.goto(origin);
   await created.waitForTimeout(300);
   return { context, page: created };
@@ -637,6 +639,55 @@ check('download filenames stay safe', await app.evaluate(() =>
   check('nothing scrolls sideways on a narrow screen',
     await shot.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth) === true);
   await shaped.close();
+}
+
+// --- the viewer downloads as a blank file that runs from disk ---
+// Saved to a USB stick or a laptop, it has to open with no network and no site, and it
+// must carry none of the conversation that was on screen when it was saved.
+{
+  const { context: portable, page: source } = await freshPage({ acceptDownloads: true });
+  await source.setInputFiles('#txt', { name: 'other.zip', mimeType: 'application/zip', buffer: otherZip });
+  await source.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await source.click('#save');
+  await source.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+  await source.waitForTimeout(400);
+
+  const [copy] = await Promise.all([
+    source.waitForEvent('download', { timeout: 30000 }),
+    source.click('#saveViewer'),
+  ]);
+  const saved = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'drawer-')), 'viewer.html');
+  await copy.saveAs(saved);
+  const copied = fs.readFileSync(saved, 'utf8');
+
+  check('the downloaded viewer carries no conversation',
+    !copied.includes('다른방') && !copied.includes('메시지 본문')
+      && /<script id="embedded-chat"[^>]*><\/script>/.test(copied),
+    `${(copied.length / 1024).toFixed(0)}KB`);
+
+  const offline = await portable.newPage();
+  await offline.goto('file://' + saved);
+  await offline.waitForTimeout(600);
+  check('the downloaded viewer opens from disk',
+    (await offline.title()).includes('대화서랍'), await offline.title());
+  check('the downloaded viewer starts empty',
+    await offline.evaluate(() => document.querySelectorAll('#rooms .room').length === 0
+      && $('title').textContent === '내 대화' && $('roomCount').textContent === '0') === true);
+
+  await offline.setInputFiles('#txt', { name: 'other.zip', mimeType: 'application/zip', buffer: otherZip });
+  await offline.waitForFunction(() => $('review').open, null, { timeout: 60000 });
+  await offline.click('#save');
+  await offline.waitForFunction(() => !$('review').open, null, { timeout: 60000 });
+  await offline.waitForTimeout(600);
+  check('the downloaded viewer imports with no server at all',
+    await offline.evaluate(() => document.querySelectorAll('#messages .bubble').length) > 0,
+    await offline.textContent('#count'));
+
+  await offline.reload();
+  await offline.waitForTimeout(1200);
+  check('what the downloaded viewer holds survives a reload',
+    await offline.evaluate(() => library.rooms.length) === 1);
+  await portable.close();
 }
 
 check('no page or console errors anywhere', errors.length === 0, errors.join(' | '));
