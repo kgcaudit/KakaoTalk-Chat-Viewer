@@ -538,7 +538,7 @@ check('download filenames stay safe', await app.evaluate(() =>
   await offline.goto(origin, { waitUntil: 'load' }).catch(() => {});
   await offline.waitForTimeout(1500);
   check('the app opens with the host unreachable',
-    (await offline.title().catch(() => '')).includes('대화서랍'), await offline.title().catch(() => '(no title)'));
+    (await offline.title().catch(() => '')).includes('KakaoTalk Chat Archive'), await offline.title().catch(() => '(no title)'));
   check('the conversations are there offline',
     await offline.evaluate(() => document.querySelectorAll('#rooms .room').length).catch(() => 0) === 2);
   online = true;
@@ -669,7 +669,7 @@ check('download filenames stay safe', await app.evaluate(() =>
   await offline.goto('file://' + saved);
   await offline.waitForTimeout(600);
   check('the downloaded viewer opens from disk',
-    (await offline.title()).includes('대화서랍'), await offline.title());
+    (await offline.title()).includes('KakaoTalk Chat Archive'), await offline.title());
   check('the downloaded viewer starts empty',
     await offline.evaluate(() => document.querySelectorAll('#rooms .room').length === 0
       && $('title').textContent === '내 대화' && $('roomCount').textContent === '0') === true);

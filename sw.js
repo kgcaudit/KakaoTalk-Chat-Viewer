@@ -1,4 +1,4 @@
-// Offline shell for 대화서랍.
+// Offline shell for KakaoTalk Chat Archive.
 //
 // This worker caches ONE thing: the viewer document itself. Conversations live in
 // IndexedDB and never pass through here, so nothing a user imports is ever written
